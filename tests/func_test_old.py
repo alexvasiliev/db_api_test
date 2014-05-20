@@ -8,18 +8,18 @@ import pprint
 import random
 import urlparse
 import datetime
+from optparse import OptionParser
 
 import func_test_constants as constants
 sys.path.append('../lib')
 sys.path.append('../doc')
+
 import tools
 from doc_conf import DISCR
+from students import students
 
-#CONFIG_PATH = '/usr/local/etc/test.conf'
-settings = {
-#	'url': 'http://193.167.2.35/'
-        'url': 'http://localhost:80/'
-}
+CONFIG_PATH = '/usr/local/etc/test.conf'
+settings = tools.Configuration(CONFIG_PATH).get_section('func_test')
 
 class TestLog(object):
     def __init__(self):
@@ -28,10 +28,8 @@ class TestLog(object):
     def write(self, message, level='info'):
         time = datetime.datetime.now().strftime('[%Y-%m-%d %H:%M:%S] ')
         msg = time + message
-	print(msg)
+        # print message
         self.test_log.append({'message': message, 'level': level})
-
-log = TestLog()
 
 class TestError(object):
     message_for_code = {
@@ -46,19 +44,23 @@ class TestError(object):
     def save_and_exit(self, exit=True):
         print 'EXIT!'
         if exit:
-            sys.exit(0)
+            sys.exit(0)        
 
 docs = {}
+TESTS = {}
+log = None
 class Actor(object):
     # 0 - OK
     # 1 - error
     # 2 - response != expected_response
-    def __init__(self, student_name):
-        self.url_prefix = urlparse.urljoin(settings['url'], student_name)
+    def __init__(self, student_ip):
+        self.url_prefix = settings['url'].replace('ip', student_ip)
         self.ok_response = {'message': 'OK', 'code': 0}
 
     def query_api(self, url_suffix, query_dict, post=False):
         url = self.url_prefix + '/' + url_suffix + '/'
+        if 'details' not  in url_suffix:
+            self.url_suffix = url_suffix
         method = 'POST' if post else 'GET'
         log.write('Requesting %s with %s (%s)' % (url, str(query_dict), method))
         try:
@@ -76,7 +78,7 @@ class Actor(object):
     def doc(self, url, query_dict, method, response):
         optional_args = set(['order', 'since', 'since_id', 'limit', 'related', 'isAnonymous', 'isApproved', 'isSpam', 'isDeleted', 'isEdited', 'isHighlighted', 'parent'])
         get_arg_type = lambda k: 'optional' if k in optional_args else 'requried'
-        path_parts = url.split('db/api')[1].strip('/').split('/')
+        path_parts = url.split('api')[1].strip('/').split('/')
         entity_name = path_parts[0]
         entity_method = path_parts[1]
         path = os.path.join('../doc', entity_name, entity_method + '.md')
@@ -88,7 +90,7 @@ class Actor(object):
             'requried': set(),
             'optional': set(),
             'response': pprint.pformat(response),
-            'url': url.replace('127.0.0.1:8000', 'some.host.ru'),
+            'url': url.replace('127.0.0.1:5000', 'some.host.ru'),
             'params': str(query_dict),
         }
         for k in query_dict:
@@ -140,9 +142,9 @@ class Actor(object):
         }
         url_suffix = 'create'
         response = self.query_api(url_suffix=url_suffix, query_dict=query_dict, post=True)
-        api_obj = self._create_from_dict(response)
+        api_obj = self._create_from_dict(response)        
         test_obj = self._create_from_dict(query_dict)
-        test_obj.id = api_obj.id
+        test_obj.id = api_obj.id if hasattr(api_obj, 'id') else -1
         self._trigger_side_effects(test_obj)
         self.validate_single(test_obj, related=related_for_type.get(test_obj.type))
         return test_obj
@@ -155,36 +157,48 @@ class Actor(object):
         if related: query_dict['related'] = related
 
         response = self.query_api(url_suffix=url_suffix, query_dict=query_dict)
-        obj = self._create_from_dict(response)
+        obj = self._create_from_dict(response)        
         return obj
 
+    def _get_api_location(self):
+        return self.url_prefix.split('/')[-1] + '/' + self.url_suffix
+
     def validate_single(self, test_obj, related=None):
+        location = self._get_api_location()
         log.write('Validating by requesting object details')
         if related is None:
             related = []
         api_obj = self.details(obj=test_obj, related=related)
         if test_obj != api_obj:
-            raise ValueError
+            TESTS[location] = False
+            # raise ValueError
             # return False
+        if TESTS.get(location, True):
+            TESTS[location] = True
         return True
 
     def validate_list(self, test_obj_list, api_obj_list):
+        location = self._get_api_location()
         log.write('Validating by requesting list of objects')
         if len(api_obj_list) == len(test_obj_list):
             for test_obj, api_obj in zip(test_obj_list, api_obj_list):
                 if test_obj != api_obj:
-                    raise ValueError
+                    TESTS[location] = False
+                    # raise ValueError
                     # return False
         else:
+            TESTS[location] = False
             log.write('len(api objects list) != len(test object list): %d != %d' % (len(api_obj_list), len(test_obj_list)), level='error')
-            raise ValueError
+            # raise ValueError
             # return False
+        if TESTS.get(location, True):
+            TESTS[location] = True
         return True
 
 
 class ForumActor(Actor):
-    def __init__(self, student_name):
-        super(ForumActor, self).__init__(student_name)
+    def __init__(self, student_ip):
+        super(ForumActor, self).__init__(student_ip)
         self.url_prefix = self.url_prefix + '/forum'
 
     def list_type(self, obj_type, query_dict, validate_against):
@@ -195,8 +209,8 @@ class ForumActor(Actor):
 
 
 class ThreadActor(Actor):
-    def __init__(self, student_name):
-        super(ThreadActor, self).__init__(student_name)
+    def __init__(self, student_ip):
+        super(ThreadActor, self).__init__(student_ip)
         self.url_prefix = self.url_prefix + '/thread'
 
     def list(self, query_dict, validate_against):
@@ -269,8 +283,8 @@ class ThreadActor(Actor):
 
 
 class PostActor(Actor):
-    def __init__(self, student_name):
-        super(PostActor, self).__init__(student_name)
+    def __init__(self, student_ip):
+        super(PostActor, self).__init__(student_ip)
         self.url_prefix = self.url_prefix + '/post'
 
     def list(self, query_dict, validate_against):
@@ -307,8 +321,8 @@ class PostActor(Actor):
         return self.validate_single(post)
 
 class UserActor(Actor):
-    def __init__(self, student_name):
-        super(UserActor, self).__init__(student_name)
+    def __init__(self, student_ip):
+        super(UserActor, self).__init__(student_ip)
         self.url_prefix = self.url_prefix + '/user'
 
     def update_profile(self, query_dict, user):
@@ -361,7 +375,7 @@ class UserActor(Actor):
 class ForumEntity(object):
     def __init__(self, **kwargs):
         for a, v in kwargs.items():
-            setattr(self, a, v)
+            setattr(self, a, v)    
 
     def __str__(self):
         return pprint.pformat(self.__dict__)
@@ -409,8 +423,8 @@ class ForumEntity(object):
                             related_to = TestScenario.get_eq_obj(related_ao)
                         if related_to != related_ao:
                             log.write('Related <%s> from API response [%s] dont match test object [%s]' % (attr, str(ao_dict.get(attr)), str(to_dict[attr])), level='error')
-                            raise ValueError
-                            # return -1
+                            # raise ValueError
+                            return -1
                     if isinstance(to_dict[attr], (set,list)) and isinstance(ao_dict[attr], (set, list)):
                         to_dict[attr] = set(to_dict[attr])
                         ao_dict[attr] = set(ao_dict[attr])
@@ -552,14 +566,24 @@ class TestScenario(object):
         container = TestScenario.container_for_type[obj_type]
         return container[obj_id]
 
-    def __init__(self, student_name):
-        self.forum_actor = ForumActor(student_name)
-        self.post_actor = PostActor(student_name)
-        self.thread_actor = ThreadActor(student_name)
-        self.user_actor = UserActor(student_name)
+    def __init__(self, student_ip):
+        TestScenario.forums.clear()
+        TestScenario.posts.clear()
+        TestScenario.threads.clear()
+        TestScenario.users.clear()          
+
+        self.forum_actor = ForumActor(student_ip)
+        self.post_actor = PostActor(student_ip)
+        self.thread_actor = ThreadActor(student_ip)
+        self.user_actor = UserActor(student_ip)
         self.test_conf = constants.TEST_CONF
 
     def start(self):
+        log.write('Clear all')
+        try:
+            tools.Request('http://%s/db/api/clear' % student_ip, {}, post=True).get_response()
+        except Exception, e:
+            pass  
         log.write('Let there be users.')
         self.register_users()
         log.write('Let there be content')
@@ -611,14 +635,14 @@ class TestScenario(object):
             elist = EntitiesList(objects, **params)
             if not self.forum_actor.list_type('post', params, elist.objects):
                 break
-
+        
         log.write('List forum threads')
         for params in constants.TEST_FORUMS['listThreads']:
-            objects = copy.deepcopy(self.threads.values())
+            objects = copy.deepcopy(self.threads.values()) 
             elist = EntitiesList(objects, **params)
             if not self.forum_actor.list_type('thread', params, elist.objects):
                 break
-
+        
         log.write('List forum users')
         for params in constants.TEST_FORUMS['listUsers']:
             objects = []
@@ -639,11 +663,11 @@ class TestScenario(object):
         for params in constants.TEST_POSTS['list']:
             objects = copy.deepcopy(self.posts.values())
             if 'forum' not in params:
-                thread = random.choice(self.threads.values())
+                thread = random.choice(self.threads.values()) 
                 params['thread'] = thread.id
             elist = EntitiesList(objects, **params)
             self.post_actor.list(params, elist.objects)
-
+        
         post = random.choice(self.posts.values())
         log.write('Remove post')
         self.post_actor.remove({'post': post.id}, post)
@@ -661,16 +685,16 @@ class TestScenario(object):
         # print 'TEST THREADS'
         log.write('List some threads')
         for params in constants.TEST_THREADS['list']:
-            objects = copy.deepcopy(self.threads.values())
+            objects = copy.deepcopy(self.threads.values()) 
             elist = EntitiesList(objects, **params)
             self.thread_actor.list(params, elist.objects)
         log.write('And list posts in them')
         for params in constants.TEST_THREADS['listPosts']:
             thread = random.choice(self.threads.values())
             params['thread'] = thread.id
-            objects = copy.deepcopy([p for p in self.posts.values() if p.thread == thread.id])
+            objects = copy.deepcopy([p for p in self.posts.values() if p.thread == thread.id]) 
             elist = EntitiesList(objects, **params)
-            self.thread_actor.list_posts(params, elist.objects)
+            self.thread_actor.list_posts(params, elist.objects)        
 
         thread = random.choice(self.threads.values())
         log.write('Go away thread!')
@@ -703,7 +727,7 @@ class TestScenario(object):
         # print 'TEST USERS'
         log.write('OMG, I was soooooo wasted...what did I wrote yesterday?')
         for params in constants.TEST_USERS['listPosts']:
-            objects = copy.deepcopy([p for p in self.posts.values() if p.user == params['user']])
+            objects = copy.deepcopy([p for p in self.posts.values() if p.user == params['user']]) 
             elist = EntitiesList(objects, **params)
             self.user_actor.list_posts(params, elist.objects)
         log.write('It was huge mistake. Need to change a nick quickly')
@@ -717,17 +741,17 @@ class TestScenario(object):
             self.user_actor.follow(params, follower, followee)
         log.write('List followers')
         for params in constants.TEST_USERS['listFollowers']:
-            user = self.users[params['user']]
-            del params['user']
-            objects = copy.deepcopy([self.users[u] for u in user.followers])
+            user = self.users[params['user']]            
+            del params['user']     
+            objects = copy.deepcopy([self.users[u] for u in user.followers]) 
             elist = EntitiesList(objects, **params)
             params['user'] = user.email
             self.user_actor.list_followers(params, elist.objects)
         log.write('List following')
         for params in constants.TEST_USERS['listFollowing']:
-            user = self.users[params['user']]
-            del params['user']
-            objects = copy.deepcopy([self.users[u] for u in user.following])
+            user = self.users[params['user']]       
+            del params['user']     
+            objects = copy.deepcopy([self.users[u] for u in user.following]) 
             elist = EntitiesList(objects, **params)
             params['user'] = user.email
             self.user_actor.list_following(params, elist.objects)
@@ -774,23 +798,50 @@ def produce_docs(with_toc=False):
 
 
 if __name__ == '__main__':
-    passed = True
-    student_name='db/api'
-    start = datetime.datetime.now()
-    log.write('Testing started for: %s' % student_name)
-    try:
-        TestScenario(student_name=student_name).start()
-    except ValueError:
-        passed = False
+    parser = OptionParser()
+    parser.add_option("-d", "--debug", dest="is_debug_mode",
+                      action="store_true", default=False)
+    (options, args) = parser.parse_args()
+    DEBUG = options.is_debug_mode
+    students  = {u'Иван Иванов': {'ip': u'127.0.0.1:5000', 'email': u's.stupnikov@corp.mail.ru'}} if DEBUG else students
+    for name, info in sorted(students.items(), key=lambda t: t[0]):
+        name_utf = name.encode('utf-8')
+        info['ip'] = info['ip'].encode('utf-8')
+        info['email'] = info['email'].encode('utf-8')
+        ans = raw_input('Test this student (%s, %s, %s)? [y/N]' % (name_utf, info['ip'], info['email']))
+        if ans == 'y':
+            TESTS = {}
+            log = TestLog()
+            start = datetime.datetime.now()
+            log.write('Testing started for: %s' % info['ip'])
+            passed = True
+            try:
+                TestScenario(student_ip=info['ip']).start()
+            except ValueError:
+                passed = False
 
-    record = {
-        'log': log.test_log,
-        'start_time': start,
-        'passed': passed,
-        'test': 'functional'
-    }
-    # m = tools.mongodb(collection='functional_test')
-    # produce_docs()
-    # m.collection.update({'student_name': student_name}, {'$push': {'tests': record}})
-    # m.insert(record)
+            if not passed:
+                for line in log.test_log:
+                    print '%s: %s\n' % (line['level'], line['message'])
+            pprint.pprint(TESTS)
+            passed_str = '%d/%d tests passed' % (sum(1 for t in TESTS.values() if t), len(TESTS))
+            print passed_str
+            record = {
+                'log': log.test_log,
+                'start_time': start,
+                'passed': passed,
+                'test': 'functional'
+            }
+            ans = raw_input('Send email ? [y/N]')
+            if ans == 'y':
+                log_txt = ''
+                for line in log.test_log:
+                    log_txt += '%s: %s\n' % (line['level'], line['message'])
+                message = 'RESULTS:\n' + passed_str + '\n' + pprint.pformat(TESTS) + '\n\nTEST LOG:\n' + log_txt
+                tools.sendemail(to_addr_list=(info['email'],), subject='[TP]DB API: functional test results', message=message)
 
+            # m = tools.mongodb(collection='functional_test')
+            # produce_docs()
+            # m.collection.update({'student_ip': student_ip}, {'$push': {'tests': record}})
+            # m.insert(record)
+    
